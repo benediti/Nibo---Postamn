@@ -1,0 +1,75 @@
+import pandas as pd
+import json
+
+# Caminho da planilha
+ARQUIVO_PLANILHA = "planilha_nibo.xlsx"  # pode ser .csv também
+ABA = 0  # ou o nome da aba
+
+# Leitura da planilha
+df = pd.read_excel(ARQUIVO_PLANILHA, sheet_name=ABA)
+
+# Lista para armazenar os JSONs
+json_list = []
+
+for _, row in df.iterrows():
+    json_data = {
+        "stakeholderId": row["stakeholderId"],
+        "description": str(row["description"]),
+        "reference": str(row["reference"]),
+        "scheduleDate": str(row["date"]),
+        "dueDate": str(row["Vencimento"]),
+        "accrualDate": str(row["date"]),  # ou ajuste se houver outra coluna de competência
+        "categories": [
+            {
+                "categoryId": row["categoryId"],
+                "value": float(row["value"])
+            }
+        ],
+        "costCenterValueType": 0,
+        "costCenters": [
+            {
+                "costCenterId": row["costCenterId"],
+                "value": float(row["value"])
+            }
+        ],
+        "accountId": row["accountId"]
+    }
+    json_list.append(json_data)
+
+# Salva todos os JSONs em um arquivo compatível com o Postman Collection
+saida = {
+    "info": {
+        "name": "Nibo Agendamentos Automáticos",
+        "_postman_id": "auto-generated",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": []
+}
+
+for i, item in enumerate(json_list):
+    saida["item"].append({
+        "name": f"Agendamento {i+1} - {item['description']}",
+        "request": {
+            "method": "POST",
+            "header": [
+                {"key": "Content-Type", "value": "application/json"},
+                {"key": "Authorization", "value": "Bearer SEU_API_TOKEN_NIBO"}
+            ],
+            "url": {
+                "raw": "https://api.nibo.com.br/api/v1/schedules/debit",
+                "protocol": "https",
+                "host": ["api", "nibo", "com", "br"],
+                "path": ["api", "v1", "schedules", "debit"]
+            },
+            "body": {
+                "mode": "raw",
+                "raw": json.dumps(item, indent=4)
+            }
+        }
+    })
+
+# Exporta para arquivo JSON
+with open("nibo_collection.json", "w", encoding="utf-8") as f:
+    json.dump(saida, f, indent=4, ensure_ascii=False)
+
+print("✅ Arquivo 'nibo_collection.json' criado com sucesso!")
