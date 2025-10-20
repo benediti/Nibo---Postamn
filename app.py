@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import json
 import io
+import zipfile
 from datetime import datetime
 
 # Configuração da página
@@ -120,6 +121,116 @@ def converter_planilha_para_json(df, token_api, nome_colecao):
         })
     
     return colecao_postman, len(json_list), json_list
+
+def criar_jsons_individuais(df):
+    """Cria JSONs individuais para cada linha da planilha"""
+    json_list = []
+    
+    for i, row in df.iterrows():
+        # Pular linhas completamente vazias
+        if pd.isna(row).all():
+            continue
+            
+        json_data = {
+            "stakeholderId": str(row["stakeholderId"]) if pd.notna(row["stakeholderId"]) else "",
+            "description": str(row["description"]) if pd.notna(row["description"]) else "",
+            "reference": str(row["reference"]) if pd.notna(row["reference"]) else "",
+            "scheduleDate": str(row["date"]) if pd.notna(row["date"]) else "",
+            "dueDate": str(row["Vencimento"]) if pd.notna(row["Vencimento"]) else "",
+            "accrualDate": str(row["date"]) if pd.notna(row["date"]) else "",
+            "categories": [
+                {
+                    "categoryId": str(row["categoryId"]) if pd.notna(row["categoryId"]) else "",
+                    "value": float(row["value"]) if pd.notna(row["value"]) else 0.0
+                }
+            ],
+            "costCenterValueType": 0,
+            "costCenters": [
+                {
+                    "costCenterId": str(row["costCenterId"]) if pd.notna(row["costCenterId"]) else "",
+                    "value": float(row["value"]) if pd.notna(row["value"]) else 0.0
+                }
+            ]
+        }
+        json_list.append(json_data)
+    
+    return json_list
+
+def criar_zip_com_jsons(json_list):
+    """Cria arquivo ZIP com JSONs individuais"""
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        # Criar arquivo de controle para Collection Runner
+        control_data = []
+        
+        for i, json_data in enumerate(json_list):
+            # Nome do arquivo baseado na descrição
+            descricao_limpa = "".join(c for c in json_data["description"] if c.isalnum() or c in (' ', '-', '_')).rstrip()
+            nome_arquivo = f"agendamento_{i+1:03d}_{descricao_limpa[:30]}.json"
+            
+            # Adicionar JSON individual ao ZIP
+            json_string = json.dumps(json_data, indent=2, ensure_ascii=False)
+            zip_file.writestr(nome_arquivo, json_string)
+            
+            # Adicionar ao arquivo de controle
+            control_data.append({"file": nome_arquivo})
+        
+        # Criar arquivo de controle data.json
+        control_json = json.dumps(control_data, indent=2, ensure_ascii=False)
+        zip_file.writestr("data.json", control_json)
+        
+        # Criar arquivo README com instruções
+        readme_content = f"""# Nibo API - JSONs Individuais
+Gerado em: {datetime.now().strftime('%d/%m/%Y às %H:%M')}
+
+## Arquivos inclusos:
+- {len(json_list)} arquivos JSON individuais (agendamento_XXX_*.json)
+- data.json: Arquivo de controle para Collection Runner do Postman
+
+## Como usar no Postman Collection Runner:
+
+1. **Crie uma requisição POST** para: https://api.nibo.com.br/api/v1/schedules/debit
+2. **Adicione os headers**:
+   - Content-Type: application/json
+   - Authorization: Bearer SEU_TOKEN_AQUI
+
+3. **Pre-request Script** (copie e cole):
+```javascript
+const fs = require('fs');
+const path = require('path');
+
+// Caminho onde você extraiu os JSONs
+const basePath = "C:/caminho/para/seus/jsons"; // AJUSTE ESTE CAMINHO
+
+// Obtém o nome do arquivo da variável "file"
+const fileName = pm.iterationData.get("file");
+const filePath = path.join(basePath, fileName);
+
+// Lê o conteúdo do JSON e define como body
+const fileContent = fs.readFileSync(filePath, 'utf8');
+pm.request.body.raw = fileContent;
+
+console.log("Carregando arquivo:", fileName);
+```
+
+4. **No Collection Runner**:
+   - Selecione o arquivo data.json como Data File
+   - Configure o número de iterações: {len(json_list)}
+   - Execute a coleção
+
+## Estrutura dos arquivos:
+Cada JSON contém um agendamento completo com:
+- stakeholderId, description, reference
+- scheduleDate, dueDate, accrualDate
+- categories (categoryId + value)
+- costCenters (costCenterId + value)
+- costCenterValueType: 0 (fixo)
+"""
+        zip_file.writestr("README.md", readme_content)
+    
+    zip_buffer.seek(0)
+    return zip_buffer
 
 def criar_colecao_com_runner(df, token_api, nome_colecao):
     """Cria coleção otimizada para Collection Runner com arquivo de dados"""
@@ -309,8 +420,8 @@ if uploaded_file is not None:
             
             tipo_colecao = st.radio(
                 "Escolha o tipo de coleção:",
-                ["📋 Coleção Tradicional", "⚡ Coleção para Collection Runner"],
-                help="Tradicional: Uma requisição por linha da planilha\nCollection Runner: Uma requisição única que usa dados externos"
+                ["📋 Coleção Tradicional", "⚡ Coleção para Collection Runner", "📁 JSONs Individuais (ZIP)"],
+                help="Tradicional: Uma requisição por linha da planilha\nCollection Runner: Uma requisição única que usa dados externos\nJSONs Individuais: Cada linha vira um arquivo JSON separado"
             )
             
             # Botão para gerar coleção
@@ -338,7 +449,7 @@ if uploaded_file is not None:
                                 use_container_width=True
                             )
                             
-                        else:
+                        elif tipo_colecao == "⚡ Coleção para Collection Runner":
                             # Coleção para Collection Runner
                             colecao_runner, data_file, total_requests = criar_colecao_com_runner(df, token_api, nome_colecao)
                             
@@ -387,12 +498,70 @@ if uploaded_file is not None:
                                 - ✅ **Logs detalhados** de cada execução
                                 """)
                         
+                        else:
+                            # JSONs Individuais em ZIP
+                            json_list = criar_jsons_individuais(df)
+                            zip_data = criar_zip_com_jsons(json_list)
+                            
+                            st.success(f"✅ ZIP com JSONs individuais gerado! {len(json_list)} arquivos criados")
+                            
+                            # Download do ZIP
+                            st.download_button(
+                                label="📦 Baixar ZIP com JSONs",
+                                data=zip_data.getvalue(),
+                                file_name=f"nibo_jsons_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                                mime="application/zip",
+                                use_container_width=True
+                            )
+                            
+                            # Instruções de uso
+                            with st.expander("📖 Como usar os JSONs individuais"):
+                                st.markdown(f"""
+                                ### 📦 Conteúdo do ZIP:
+                                - **{len(json_list)} arquivos JSON** individuais
+                                - **data.json**: Arquivo de controle para Collection Runner
+                                - **README.md**: Instruções completas de uso
+                                
+                                ### 🔧 Opção 1 - Collection Runner (Recomendado):
+                                1. **Extraia o ZIP** em uma pasta no seu computador
+                                2. **Crie uma requisição POST** no Postman para a API Nibo
+                                3. **Copie o Pre-request Script** do README.md
+                                4. **Use data.json** como Data File no Runner
+                                5. **Ajuste o caminho** no script para a pasta extraída
+                                
+                                ### 📋 Opção 2 - Uso Manual:
+                                - Cada arquivo JSON pode ser usado individualmente
+                                - Copie e cole o conteúdo no body das requisições
+                                - Ideal para testes específicos ou debugging
+                                
+                                ### 🎯 Vantagens dos JSONs separados:
+                                - ✅ **Flexibilidade total** de uso
+                                - ✅ **Fácil debugging** de registros específicos
+                                - ✅ **Reutilização** de JSONs individuais
+                                - ✅ **Controle granular** sobre cada requisição
+                                """)
+                            
+                            # Mostrar lista dos arquivos que serão criados
+                            with st.expander("📋 Preview dos arquivos no ZIP"):
+                                st.markdown("### Arquivos que serão gerados:")
+                                for i, json_data in enumerate(json_list[:10]):  # Mostrar apenas os primeiros 10
+                                    descricao_limpa = "".join(c for c in json_data["description"] if c.isalnum() or c in (' ', '-', '_')).rstrip()
+                                    nome_arquivo = f"agendamento_{i+1:03d}_{descricao_limpa[:30]}.json"
+                                    st.text(f"📄 {nome_arquivo}")
+                                
+                                if len(json_list) > 10:
+                                    st.text(f"... e mais {len(json_list) - 10} arquivos")
+                                
+                                st.text("📄 data.json (arquivo de controle)")
+                                st.text("📄 README.md (instruções de uso)")
+                        
                         # Mostrar preview da coleção
-                        with st.expander("🔍 Preview da Coleção JSON"):
-                            if tipo_colecao == "📋 Coleção Tradicional":
-                                st.json(colecao, expanded=False)
-                            else:
-                                st.json(colecao_runner, expanded=False)
+                        if tipo_colecao != "📁 JSONs Individuais (ZIP)":
+                            with st.expander("🔍 Preview da Coleção JSON"):
+                                if tipo_colecao == "📋 Coleção Tradicional":
+                                    st.json(colecao, expanded=False)
+                                else:
+                                    st.json(colecao_runner, expanded=False)
     
     except Exception as e:
         st.error(f"❌ Erro ao processar o arquivo: {str(e)}")
