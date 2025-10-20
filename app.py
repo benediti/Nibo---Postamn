@@ -2,10 +2,8 @@ import streamlit as st
 import pandas as pd
 import json
 import io
-from datetime import datetime
-import sys, csv
 import zipfile
-import re
+from datetime import datetime
 
 # Configuração da página
 st.set_page_config(
@@ -56,12 +54,6 @@ def validar_dados(df):
     
     return erros
 
-def _safe_filename(s: str) -> str:
-    s = str(s or "").strip()
-    s = re.sub(r'[^\w\s-]', '', s)
-    s = re.sub(r'[-\s]+', '_', s)
-    return (s or "item")[:80]
-
 def converter_planilha_para_json(df, token_api, nome_colecao):
     """Converte a planilha em formato JSON para coleção Postman"""
     json_list = []
@@ -100,7 +92,7 @@ def converter_planilha_para_json(df, token_api, nome_colecao):
             "name": nome_colecao,
             "_postman_id": f"auto-generated-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
             "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-            "description": f"Coleção gerada automaticamente em {datetime.now().strftime('%d/%m/%Y às %H:%M')}"
+            "description": f"Coleção gerada automaticamente em {datetime.now().strftime('%d/%m/%Y às %H:%M')}\n\nEndpoint: https://api.nibo.com.br/empresas/v1/schedules/debit"
         },
         "item": []
     }
@@ -112,7 +104,7 @@ def converter_planilha_para_json(df, token_api, nome_colecao):
                 "method": "POST",
                 "header": [
                     {"key": "Content-Type", "value": "application/json"},
-                    {"key": "ApiToken", "value": f"{token_api}"}
+                    {"key": "ApiToken", "value": token_api, "type": "text"}
                 ],
                 "url": {
                     "raw": "https://api.nibo.com.br/empresas/v1/schedules/debit",
@@ -122,13 +114,186 @@ def converter_planilha_para_json(df, token_api, nome_colecao):
                 },
                 "body": {
                     "mode": "raw",
-                    "raw": json.dumps(item, indent=2, ensure_ascii=False)
+                    "raw": json.dumps(item, indent=2, ensure_ascii=False),
+                    "options": {
+                        "raw": {
+                            "language": "json"
+                        }
+                    }
                 }
             },
             "response": []
         })
     
     return colecao_postman, len(json_list), json_list
+
+def criar_jsons_individuais(df):
+    """Cria JSONs individuais para cada linha da planilha"""
+    json_list = []
+    
+    for i, row in df.iterrows():
+        # Pular linhas completamente vazias
+        if pd.isna(row).all():
+            continue
+            
+        json_data = {
+            "stakeholderId": str(row["stakeholderId"]) if pd.notna(row["stakeholderId"]) else "",
+            "description": str(row["description"]) if pd.notna(row["description"]) else "",
+            "reference": str(row["reference"]) if pd.notna(row["reference"]) else "",
+            "scheduleDate": str(row["date"]) if pd.notna(row["date"]) else "",
+            "dueDate": str(row["Vencimento"]) if pd.notna(row["Vencimento"]) else "",
+            "accrualDate": str(row["date"]) if pd.notna(row["date"]) else "",
+            "categories": [
+                {
+                    "categoryId": str(row["categoryId"]) if pd.notna(row["categoryId"]) else "",
+                    "value": float(row["value"]) if pd.notna(row["value"]) else 0.0
+                }
+            ],
+            "costCenterValueType": 0,
+            "costCenters": [
+                {
+                    "costCenterId": str(row["costCenterId"]) if pd.notna(row["costCenterId"]) else "",
+                    "value": float(row["value"]) if pd.notna(row["value"]) else 0.0
+                }
+            ]
+        }
+        json_list.append(json_data)
+    
+    return json_list
+
+def criar_zip_com_jsons(json_list):
+    """Cria arquivo ZIP com JSONs individuais"""
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        # Criar arquivo de controle para Collection Runner
+        control_data = []
+        
+        for i, json_data in enumerate(json_list):
+            # Nome do arquivo baseado na descrição
+            descricao_limpa = "".join(c for c in json_data["description"] if c.isalnum() or c in (' ', '-', '_')).rstrip()
+            nome_arquivo = f"agendamento_{i+1:03d}_{descricao_limpa[:30]}.json"
+            
+            # Adicionar JSON individual ao ZIP
+            json_string = json.dumps(json_data, indent=2, ensure_ascii=False)
+            zip_file.writestr(nome_arquivo, json_string)
+            
+            # Adicionar ao arquivo de controle
+            control_data.append({"file": nome_arquivo})
+        
+        # Criar arquivo de controle data.json
+        control_json = json.dumps(control_data, indent=2, ensure_ascii=False)
+        zip_file.writestr("data.json", control_json)
+        
+        # Criar arquivo README com instruções
+        readme_content = f"""# Nibo API - JSONs Individuais
+Gerado em: {datetime.now().strftime('%d/%m/%Y às %H:%M')}
+
+## ⚠️ IMPORTANTE - API Nibo usa ApiToken no Header
+
+**CORRETO**: ApiToken: SEU_TOKEN_AQUI
+**ERRADO**: Authorization: Bearer SEU_TOKEN_AQUI
+
+## Endpoint da API:
+```
+POST https://api.nibo.com.br/empresas/v1/schedules/debit
+```
+
+## Headers necessários:
+```
+Content-Type: application/json
+ApiToken: SEU_TOKEN_AQUI
+```
+
+## Arquivos inclusos:
+- {len(json_list)} arquivos JSON individuais (agendamento_XXX_*.json)
+- data.json: Arquivo de controle para Collection Runner do Postman
+
+## Como usar no Postman Collection Runner:
+
+### Método 1 - Collection Runner com arquivos locais (Recomendado)
+
+1. **Crie uma requisição POST** para: 
+   ```
+   https://api.nibo.com.br/empresas/v1/schedules/debit
+   ```
+
+2. **Adicione os headers**:
+   - Content-Type: application/json
+   - ApiToken: SEU_TOKEN_AQUI
+
+3. **Pre-request Script** (copie e cole):
+```javascript
+const fs = require('fs');
+const path = require('path');
+
+// Caminho onde você extraiu os JSONs - AJUSTE ESTE CAMINHO!
+const basePath = "C:/caminho/para/seus/jsons";
+
+// Obtém o nome do arquivo da variável "file"
+const fileName = pm.iterationData.get("file");
+const filePath = path.join(basePath, fileName);
+
+try {{
+    // Lê o conteúdo do JSON e define como body
+    const fileContent = fs.readFileSync(filePath, 'utf8');
+    pm.request.body.raw = fileContent;
+    
+    console.log("✅ Carregando arquivo:", fileName);
+    console.log("Descrição:", JSON.parse(fileContent).description);
+}} catch (error) {{
+    console.error("❌ Erro ao carregar arquivo:", error);
+}}
+```
+
+4. **No Collection Runner**:
+   - Selecione sua coleção
+   - Clique em "Select File" na seção Data
+   - Escolha o arquivo **data.json**
+   - Configure iterações: {len(json_list)}
+   - Ajuste o delay entre requisições (recomendado: 500ms)
+   - Clique em "Run"
+
+### Método 2 - Uso Manual (para testes)
+
+1. Abra qualquer arquivo JSON individual
+2. Copie o conteúdo
+3. Cole no body da requisição POST no Postman
+4. Adicione os headers mencionados acima
+5. Execute a requisição
+
+## Estrutura dos arquivos:
+Cada JSON contém um agendamento completo com:
+- stakeholderId, description, reference
+- scheduleDate, dueDate, accrualDate
+- categories (categoryId + value)
+- costCenters (costCenterId + value)
+- costCenterValueType: 0 (fixo)
+
+## Troubleshooting:
+
+### Erro "Cannot read property of undefined"
+- Verifique se o caminho no Pre-request Script está correto
+- Confirme que todos os arquivos JSON estão na pasta especificada
+
+### Erro 401 - Unauthorized
+- Verifique se está usando "ApiToken" no header (não "Authorization")
+- Confirme se o token está correto e ativo
+
+### Erro 400 - Bad Request
+- Verifique se os IDs (stakeholderId, categoryId, costCenterId) existem no Nibo
+- Confirme se as datas estão no formato correto
+
+## Dicas:
+- Configure um delay de 500-1000ms entre requisições para evitar sobrecarga
+- Use o Console do Postman para debug (View > Show Postman Console)
+- Teste com 1-2 requisições antes de executar todas
+- Salve os logs do Runner para análise posterior
+"""
+        zip_file.writestr("README.md", readme_content)
+    
+    zip_buffer.seek(0)
+    return zip_buffer
 
 def criar_colecao_com_runner(df, token_api, nome_colecao):
     """Cria coleção otimizada para Collection Runner com arquivo de dados"""
@@ -170,8 +335,7 @@ def criar_colecao_com_runner(df, token_api, nome_colecao):
         })
     
     # Coleção otimizada com Pre-request Script
-    pre_request_script = '''
-// Script para carregar dados dinamicamente no Collection Runner
+    pre_request_script = '''// Script para carregar dados dinamicamente no Collection Runner
 const requestData = pm.iterationData.get("requestData");
 
 if (requestData) {
@@ -179,16 +343,32 @@ if (requestData) {
     pm.request.body.raw = requestData;
     
     // Log para debug
-    console.log("Enviando dados:", JSON.parse(requestData).description);
-}
-'''
+    const data = JSON.parse(requestData);
+    console.log("✅ Enviando agendamento:", data.description);
+    console.log("Valor:", data.categories[0].value);
+} else {
+    console.error("❌ Dados não encontrados para esta iteração");
+}'''
+    
+    test_script = '''// Test Script para validar a resposta
+pm.test("Status code é 200 ou 201", function () {
+    pm.expect(pm.response.code).to.be.oneOf([200, 201]);
+});
+
+pm.test("Resposta não contém erro", function () {
+    const jsonData = pm.response.json();
+    pm.expect(jsonData.error).to.be.undefined;
+});
+
+// Log da resposta
+console.log("Resposta:", pm.response.json());'''
     
     colecao_runner = {
         "info": {
             "name": f"{nome_colecao} - Collection Runner",
             "_postman_id": f"runner-generated-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
             "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-            "description": f"Coleção otimizada para Collection Runner - {datetime.now().strftime('%d/%m/%Y às %H:%M')}"
+            "description": f"Coleção otimizada para Collection Runner - {datetime.now().strftime('%d/%m/%Y às %H:%M')}\n\n⚠️ IMPORTANTE: Use 'ApiToken' no header, não 'Authorization'\n\nEndpoint: https://api.nibo.com.br/empresas/v1/schedules/debit"
         },
         "item": [
             {
@@ -200,13 +380,20 @@ if (requestData) {
                             "exec": pre_request_script.split('\n'),
                             "type": "text/javascript"
                         }
+                    },
+                    {
+                        "listen": "test",
+                        "script": {
+                            "exec": test_script.split('\n'),
+                            "type": "text/javascript"
+                        }
                     }
                 ],
                 "request": {
                     "method": "POST",
                     "header": [
-                        {"key": "Content-Type", "value": "application/json"},
-                        {"key": "ApiToken", "value": f"{token_api}"}
+                        {"key": "Content-Type", "value": "application/json", "type": "text"},
+                        {"key": "ApiToken", "value": token_api, "type": "text"}
                     ],
                     "url": {
                         "raw": "https://api.nibo.com.br/empresas/v1/schedules/debit",
@@ -216,7 +403,12 @@ if (requestData) {
                     },
                     "body": {
                         "mode": "raw",
-                        "raw": "// Este body será substituído pelo Pre-request Script"
+                        "raw": "// Este body será substituído pelo Pre-request Script\n{\n  \"stakeholderId\": \"\",\n  \"description\": \"\"\n}",
+                        "options": {
+                            "raw": {
+                                "language": "json"
+                            }
+                        }
                     }
                 },
                 "response": []
@@ -226,72 +418,31 @@ if (requestData) {
     
     return colecao_runner, data_file_list, len(json_list)
 
-# Função para corrigir arquivos CSV com problemas de codificação
-def corrigir_csv(inp):
-    """
-    inp: UploadedFile (Streamlit) ou caminho (str)
-    Retorna: io.StringIO com CSV corrigido pronto para pd.read_csv
-    """
-    # Ler conteúdo como texto
-    if hasattr(inp, "read"):
-        raw = inp.read()
-        text = raw.decode('utf-8', errors='replace') if isinstance(raw, (bytes, bytearray)) else str(raw)
-    else:
-        with open(inp, 'r', encoding='utf-8', errors='replace') as f:
-            text = f.read()
-    
-    lines = text.splitlines()
-    if not lines:
-        return io.StringIO("")
-    
-    header = lines[0].rstrip('\n')
-    output = io.StringIO()
-    writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
-    writer.writerow(header.split(','))
-    for line in lines[1:]:
-        line = line.rstrip('\n')
-        if not line.strip():
-            continue
-        # tenta localizar o JSON no começo, testando prefixos até json.loads funcionar
-        j = None
-        for i in range(1, len(line)+1):
-            try:
-                candidate = line[:i]
-                json.loads(candidate)
-                j = candidate
-                rest = line[i+1:] if i < len(line) and i < len(line) and line[i] == ',' else line[i:]
-                writer.writerow([j, rest])
-                break
-            except Exception:
-                continue
-        if j is None:
-            # fallback: grava toda a linha em uma coluna
-            writer.writerow([line])
-    output.seek(0)
-    return output
-
-def criar_zip_jsons(json_list):
-    """Recebe lista de objetos JSON e retorna bytes do ZIP com cada objeto em um arquivo separado"""
-    mem_zip = io.BytesIO()
-    with zipfile.ZipFile(mem_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for i, obj in enumerate(json_list, start=1):
-            name_safe = _safe_filename(obj.get("description", f"item_{i}"))
-            filename = f"{i:03d}_{name_safe}.json"
-            content = json.dumps(obj, indent=2, ensure_ascii=False)
-            zf.writestr(filename, content)
-    mem_zip.seek(0)
-    return mem_zip.getvalue()
-
 # Interface principal
 st.title("💰 Nibo API - Gerador de Coleções Postman")
 st.markdown("---")
+
+# Alerta importante sobre o token
+st.warning("⚠️ **IMPORTANTE**: A API do Nibo usa `ApiToken` no header, NÃO use `Authorization: Bearer`")
 
 st.markdown("""
 ### 📋 Como usar:
 1. **Configure** seu token da API Nibo na barra lateral
 2. **Carregue** sua planilha Excel/CSV com os dados financeiros
 3. **Gere** a coleção Postman automaticamente
-4. **Baixe** o arquivo JSON para importar no Postman ou um ZIP com um JSON por linha
+4. **Baixe** o arquivo JSON para importar no Postman
+5. **Execute** no Collection Runner do Postman
+
+### 🔑 Endpoint da API:
+```
+POST https://api.nibo.com.br/empresas/v1/schedules/debit
+```
+
+### 📦 Headers necessários:
+```
+Content-Type: application/json
+ApiToken: SEU_TOKEN_AQUI
+```
 """)
 
 # Sidebar para configurações
@@ -299,10 +450,11 @@ with st.sidebar:
     st.header("⚙️ Configurações")
     
     # Token da API
+    st.info("💡 **Dica**: O Nibo usa `ApiToken` no header")
     token_api = st.text_input(
         "🔑 Token da API Nibo:",
         type="password",
-        help="Será enviado no header 'ApiToken' (não use Authorization)"
+        help="Insira seu token de autenticação da API Nibo (será usado no header ApiToken)"
     )
     
     # Nome da coleção
@@ -320,6 +472,11 @@ with st.sidebar:
     ]
     for col in colunas_obrigatorias:
         st.text(f"• {col}")
+    
+    st.markdown("---")
+    st.markdown("### 🔗 Links Úteis:")
+    st.markdown("[📚 Documentação Nibo](https://api.nibo.com.br)")
+    st.markdown("[📮 Postman Download](https://www.postman.com/downloads/)")
 
 # Área principal para upload de arquivo
 st.header("📁 Upload da Planilha")
@@ -334,13 +491,11 @@ if uploaded_file is not None:
     try:
         # Ler o arquivo
         if uploaded_file.name.endswith('.csv'):
-            # Corrigir o CSV (UploadedFile -> StringIO)
-            arquivo_corrigido_io = corrigir_csv(uploaded_file)
-            df = pd.read_csv(arquivo_corrigido_io)
-            st.success("✅ Arquivo CSV corrigido e carregado com sucesso!")
+            df = pd.read_csv(uploaded_file)
         else:
             df = pd.read_excel(uploaded_file)
-            st.success(f"✅ Arquivo Excel carregado com sucesso! {len(df)} linha(s) encontrada(s)")
+        
+        st.success(f"✅ Arquivo carregado com sucesso! {len(df)} linha(s) encontrada(s)")
         
         # Mostrar preview dos dados
         with st.expander("👁️ Preview dos Dados", expanded=True):
@@ -376,27 +531,29 @@ if uploaded_file is not None:
             
             tipo_colecao = st.radio(
                 "Escolha o tipo de coleção:",
-                ["📋 Coleção Tradicional", "⚡ Coleção para Collection Runner"],
-                help="Tradicional: Uma requisição por linha da planilha\nCollection Runner: Uma requisição única que usa dados externos"
+                ["⚡ Coleção para Collection Runner (Recomendado)", "📋 Coleção Tradicional", "📁 JSONs Individuais (ZIP)"],
+                help="**Collection Runner**: Mais eficiente, uma requisição com dados externos (CSV)\n\n**Tradicional**: Uma requisição separada por linha da planilha\n\n**JSONs Individuais**: Cada linha vira um arquivo JSON separado com opção de uso no Runner"
             )
             
             # Botão para gerar coleção
             if st.button("🚀 Gerar Coleção", type="primary", use_container_width=True):
                 if not token_api:
-                    st.error("❌ Por favor, insira o token da API Nibo na barra lateral (header ApiToken)")
+                    st.error("❌ Por favor, insira o token da API Nibo na barra lateral")
                 elif not nome_colecao:
                     st.error("❌ Por favor, insira um nome para a coleção")
                 else:
                     with st.spinner("🔄 Gerando coleção Postman..."):
                         if tipo_colecao == "📋 Coleção Tradicional":
                             # Coleção tradicional
-                            colecao, total_requests, json_list = converter_planilha_para_json(df, token_api, nome_colecao)
+                            colecao, total_requests, _ = converter_planilha_para_json(df, token_api, nome_colecao)
                             
                             json_string = json.dumps(colecao, indent=2, ensure_ascii=False)
                             
                             st.success(f"✅ Coleção tradicional gerada! {total_requests} requisições criadas")
                             
-                            # Botão de download da coleção
+                            st.info("💡 **Uso**: Importe no Postman e execute cada requisição individualmente ou use 'Run Collection'")
+                            
+                            # Botão de download
                             st.download_button(
                                 label="📥 Baixar Coleção Postman",
                                 data=json_string,
@@ -404,24 +561,14 @@ if uploaded_file is not None:
                                 mime="application/json",
                                 use_container_width=True
                             )
-
-                            # ZIP com um JSON por linha
-                            zip_bytes = criar_zip_jsons(json_list)
-                            st.download_button(
-                                label="📥 Baixar JSONs por linha (ZIP)",
-                                data=zip_bytes,
-                                file_name=f"nibo_jsons_por_linha_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-                                mime="application/zip",
-                                use_container_width=True
-                            )
                             
-                        else:
+                        elif tipo_colecao == "⚡ Coleção para Collection Runner (Recomendado)":
                             # Coleção para Collection Runner
                             colecao_runner, data_file, total_requests = criar_colecao_com_runner(df, token_api, nome_colecao)
                             
                             # Criar arquivo de dados CSV para o runner
                             df_runner = pd.DataFrame(data_file)
-                            csv_data = df_runner.to_csv(index=False, encoding='utf-8')
+                            csv_data = df_runner.to_csv(index=False, encoding='utf-8-sig')
                             
                             json_string = json.dumps(colecao_runner, indent=2, ensure_ascii=False)
                             
@@ -431,7 +578,7 @@ if uploaded_file is not None:
                             col1, col2 = st.columns(2)
                             with col1:
                                 st.download_button(
-                                    label="📥 Baixar Coleção",
+                                    label="📥 1️⃣ Baixar Coleção JSON",
                                     data=json_string,
                                     file_name=f"nibo_runner_collection_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                                     mime="application/json",
@@ -439,42 +586,62 @@ if uploaded_file is not None:
                                 )
                             with col2:
                                 st.download_button(
-                                    label="📊 Baixar Dados CSV",
+                                    label="📊 2️⃣ Baixar Dados CSV",
                                     data=csv_data,
                                     file_name=f"nibo_runner_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                                     mime="text/csv",
                                     use_container_width=True
                                 )
-
-                            # Também ZIP com JSONs do runner
-                            zip_bytes = criar_zip_jsons([json.loads(d["requestData"]) for d in data_file])
+                            
+                            # Instruções de uso
+                            with st.expander("📖 Como usar no Collection Runner", expanded=True):
+                                st.markdown("""
+                                ### 🎯 Passo a passo:
+                                
+                                1. **Baixe os 2 arquivos** acima (JSON e CSV)
+                                2. **Importe a coleção JSON** no Postman
+                                3. **Abra a coleção** e clique em "Run" (ícone de play)
+                                4. **Na aba "Data"**: Clique em "Select File" e escolha o arquivo CSV
+                                5. **Configure**:
+                                   - Iterations: Automático (baseado no CSV)
+                                   - Delay: 500ms (recomendado)
+                                6. **Clique em "Run"** e acompanhe o progresso!
+                                
+                                ### ⚡ Vantagens do Collection Runner:
+                                - ✅ **Mais eficiente** - Uma requisição configurável para todos os dados
+                                - ✅ **Controle de velocidade** - Delay entre requisições evita sobrecarga
+                                - ✅ **Relatórios detalhados** - Veja sucessos/falhas em tempo real
+                                - ✅ **Logs completos** - Debug facilitado no Console
+                                - ✅ **Testes automáticos** - Validação de status code e resposta
+                                
+                                ### 🐛 Debug:
+                                - Abra o Postman Console (View > Show Postman Console)
+                                - Veja os logs de cada requisição em tempo real
+                                - Identifique facilmente quais agendamentos falharam
+                                """)
+                        
+                        else:
+                            # JSONs Individuais em ZIP
+                            json_list = criar_jsons_individuais(df)
+                            zip_data = criar_zip_com_jsons(json_list)
+                            
+                            st.success(f"✅ ZIP com JSONs individuais gerado! {len(json_list)} arquivos criados")
+                            
+                            # Download do ZIP
                             st.download_button(
-                                label="📥 Baixar JSONs por linha (ZIP)",
-                                data=zip_bytes,
-                                file_name=f"nibo_jsons_por_linha_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                                label="📦 Baixar ZIP com JSONs Individuais",
+                                data=zip_data.getvalue(),
+                                file_name=f"nibo_jsons_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
                                 mime="application/zip",
                                 use_container_width=True
                             )
-                        
-                        # Mostrar preview da coleção
-                        with st.expander("🔍 Preview da Coleção JSON"):
-                            if tipo_colecao == "📋 Coleção Tradicional":
-                                st.json(colecao, expanded=False)
-                            else:
-                                st.json(colecao_runner, expanded=False)
-    
-    except Exception as e:
-        st.error(f"❌ Erro ao processar o arquivo: {str(e)}")
-        st.info("💡 Verifique se o arquivo está no formato correto e não está corrompido")
-
-else:
-    st.info("👆 Faça upload de uma planilha para começar")
-
-# Footer
-st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: #666;'>"
-    "💡 <strong>Dica:</strong> Use o header ApiToken e o endpoint https://api.nibo.com.br/empresas/v1/schedules/debit"
-    "</div>",
-    unsafe_allow_html=True
-)
+                            
+                            # Instruções de uso
+                            with st.expander("📖 Como usar os JSONs individuais", expanded=True):
+                                st.markdown(f"""
+                                ### 📦 Conteúdo do ZIP:
+                                - **{len(json_list)} arquivos JSON** individuais (um por agendamento)
+                                - **data.json**: Arquivo de controle para Collection Runner
+                                - **README.md**: Instruções detalhadas de uso
+                                
+                                ### 🔧 Opção 1 - Collection Runner (
